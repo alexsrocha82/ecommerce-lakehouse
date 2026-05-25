@@ -1,0 +1,68 @@
+# ============================================================
+# E-Commerce Lakehouse — .gitignore
+# ============================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter / Databricks
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment variables — NEVER commit secrets
+.env
+.env.*
+*.env
+secrets.json
+secrets.yaml
+
+# Auto Loader checkpoints — generated at runtime, not source code
+checkpoints/
+**/checkpoints/
+
+# Delta Lake local artifacts
+_delta_log/
+*.parquet
+*.delta
+
+# OS artifacts
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Databricks
+.databricks/
+databricks.yml.local
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
