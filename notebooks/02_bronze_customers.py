@@ -2,29 +2,43 @@
 # MAGIC %md
 # MAGIC # 02 · Bronze — Customers (Free Edition)
 # MAGIC
-# MAGIC **Pré-requisito:** notebook `00_setup` executado.
+# MAGIC **Prerequisite:** notebook `00_setup` must be executed first.
 # MAGIC
-# MAGIC Ingestão incremental de clientes via Auto Loader.
-# MAGIC Dado bruto preservado sem transformação.
+# MAGIC Incremental ingestion of customer records via Auto Loader.
+# MAGIC Raw data is preserved without any transformation.
 
 # COMMAND ----------
 
-dbutils.widgets.text("env",            "dev", "Ambiente")
-dbutils.widgets.text("execution_date", "",    "Data (yyyy-MM-dd)")
+# MAGIC %md ## Parameters
+
+# COMMAND ----------
+
+dbutils.widgets.text("env", "dev", "Environment")
+dbutils.widgets.text("execution_date", "", "Date (yyyy-MM-dd) — empty = today")
 
 ENV            = dbutils.widgets.get("env")
 execution_date = dbutils.widgets.get("execution_date") or \
                  __import__("datetime").date.today().isoformat()
 
-BASE_PATH       = f"dbfs:/FileStore/ecommerce/{ENV}"
-LANDING_PATH    = f"{BASE_PATH}/landing/customers"
-CHECKPOINT_PATH = f"{BASE_PATH}/checkpoints/customers/bronze"
-SCHEMA_PATH     = f"{BASE_PATH}/checkpoints/customers/schema"
+# Unity Catalog Volumes (replaces dbfs:/FileStore/ — disabled in Free Edition)
+UC_CATALOG       = "main"
+UC_VOLUME_SCHEMA = f"ecommerce_{ENV}"
+VOLUME_BASE      = f"/Volumes/{UC_CATALOG}/{UC_VOLUME_SCHEMA}/landing"
+
+LANDING_PATH    = f"{VOLUME_BASE}/customers"
+CHECKPOINT_PATH = f"{VOLUME_BASE}/checkpoints/customers/bronze"
+SCHEMA_PATH     = f"{VOLUME_BASE}/checkpoints/customers/schema"
 BRONZE_TABLE    = f"{ENV}_bronze.customers"
 
-print(f"ENV          : {ENV}")
-print(f"Landing      : {LANDING_PATH}")
-print(f"Tabela       : {BRONZE_TABLE}")
+print(f"ENV            : {ENV}")
+print(f"execution_date : {execution_date}")
+print(f"Landing        : {LANDING_PATH}")
+print(f"Checkpoint     : {CHECKPOINT_PATH}")
+print(f"Table          : {BRONZE_TABLE}")
+
+# COMMAND ----------
+
+# MAGIC %md ## Auto Loader — incremental ingestion
 
 # COMMAND ----------
 
@@ -39,12 +53,15 @@ stream = (
     .option("cloudFiles.schemaLocation",      SCHEMA_PATH)
     .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
     .option("cloudFiles.inferColumnTypes",    "true")
+    # directory listing — compatible with UC Volumes in Free Edition
     .option("cloudFiles.useNotifications",    "false")
     .load(LANDING_PATH)
-    .withColumn("_source_file",    F.input_file_name())
+    # traceability metadata columns
+    .withColumn("_source_file",    F.col("_metadata.file_path"))
     .withColumn("_ingested_at",    F.current_timestamp())
     .withColumn("_execution_date", F.lit(execution_date))
     .withColumn("_env",            F.lit(ENV))
+    # partition columns based on ingestion date
     .withColumn("ingest_year",     F.year(F.current_date()))
     .withColumn("ingest_month",    F.month(F.current_date()))
 )
@@ -56,26 +73,26 @@ query = (
     .option("mergeSchema",        "true")
     .outputMode("append")
     .partitionBy("ingest_year", "ingest_month")
-    .trigger(availableNow=True)
+    .trigger(availableNow=True)   # process all pending files and stop
     .toTable(BRONZE_TABLE)
 )
 
 query.awaitTermination()
+print("[OK] Stream completed")
 
 # COMMAND ----------
 
-# MAGIC %md ## Validação
+# MAGIC %md ## Validation
 
 # COMMAND ----------
 
 df    = spark.read.format("delta").table(BRONZE_TABLE)
 count = df.count()
 
-print(f"Tabela : {BRONZE_TABLE}")
-print(f"Linhas : {count:,}")
+print(f"Table : {BRONZE_TABLE}")
+print(f"Rows  : {count:,}")
 
-# distribuição por segmento (preview dos dados)
-print("\nDistribuição por segmento:")
+print("\nRow distribution by segment:")
 display(
     df.groupBy("segment")
     .count()

@@ -2,48 +2,56 @@
 # MAGIC %md
 # MAGIC # 01 · Bronze — Orders (Free Edition)
 # MAGIC
-# MAGIC **Pré-requisito:** notebook `00_setup` executado.
+# MAGIC **Prerequisite:** notebook `00_setup` must be executed first.
 # MAGIC
-# MAGIC O que este notebook faz:
-# MAGIC - Lê arquivos JSON da pasta landing no DBFS via **Auto Loader**
-# MAGIC - Adiciona metadados de rastreabilidade obrigatórios
-# MAGIC - Grava em Delta Table particionada (camada bronze)
-# MAGIC - Valida o resultado
+# MAGIC What this notebook does:
+# MAGIC - Reads JSON files from the landing zone (UC Volume) via **Auto Loader**
+# MAGIC - Adds mandatory traceability metadata columns
+# MAGIC - Writes to a partitioned Delta Table (bronze layer)
+# MAGIC - Validates the result
 
 # COMMAND ----------
 
-# MAGIC %md ## Parâmetros
+# MAGIC %md ## Parameters
 
 # COMMAND ----------
 
-dbutils.widgets.text("env",            "dev",  "Ambiente")
-dbutils.widgets.text("execution_date", "",     "Data (yyyy-MM-dd) — vazio = hoje")
+dbutils.widgets.text("env", "dev", "Environment")
+dbutils.widgets.text("execution_date", "",    "Date (yyyy-MM-dd) — empty = today")
 
 ENV            = dbutils.widgets.get("env")
 execution_date = dbutils.widgets.get("execution_date") or \
                  __import__("datetime").date.today().isoformat()
 
-# Caminhos DBFS (Free Edition — sem ADLS)
-BASE_PATH       = f"dbfs:/FileStore/ecommerce/{ENV}"
-LANDING_PATH    = f"{BASE_PATH}/landing/orders"
-CHECKPOINT_PATH = f"{BASE_PATH}/checkpoints/orders/bronze"
-SCHEMA_PATH     = f"{BASE_PATH}/checkpoints/orders/schema"
+# Unity Catalog Volumes (replaces dbfs:/FileStore/ — disabled in Free Edition)
+UC_CATALOG       = "main"
+UC_VOLUME_SCHEMA = f"ecommerce_{ENV}"
+VOLUME_BASE      = f"/Volumes/{UC_CATALOG}/{UC_VOLUME_SCHEMA}/landing"
+
+LANDING_PATH    = f"{VOLUME_BASE}/orders"
+CHECKPOINT_PATH = f"{VOLUME_BASE}/checkpoints/orders/bronze"
+SCHEMA_PATH     = f"{VOLUME_BASE}/checkpoints/orders/schema"
 BRONZE_TABLE    = f"{ENV}_bronze.orders"
 
 print(f"ENV            : {ENV}")
 print(f"execution_date : {execution_date}")
 print(f"Landing        : {LANDING_PATH}")
-print(f"Tabela         : {BRONZE_TABLE}")
+print(f"Checkpoint     : {CHECKPOINT_PATH}")
+print(f"Table          : {BRONZE_TABLE}")
 
 # COMMAND ----------
 
-# MAGIC %md ## Auto Loader — ingestão incremental
+# MAGIC %md ## Auto Loader — incremental ingestion
+# MAGIC
+# MAGIC `availableNow=True` makes the stream behave as an incremental batch:
+# MAGIC processes all pending files in landing and terminates.
+# MAGIC The checkpoint tracks which files have already been ingested,
+# MAGIC so only new files are processed on each run.
 
 # COMMAND ----------
 
 from pyspark.sql import functions as F
 
-# cria schema da tabela bronze se não existir
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {ENV}_bronze")
 
 stream = (
@@ -53,15 +61,15 @@ stream = (
     .option("cloudFiles.schemaLocation",      SCHEMA_PATH)
     .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
     .option("cloudFiles.inferColumnTypes",    "true")
-    # No Free Edition usamos directory listing (sem Event Grid)
+    # directory listing — compatible with UC Volumes in Free Edition
     .option("cloudFiles.useNotifications",    "false")
     .load(LANDING_PATH)
-    # ── metadados de rastreabilidade ─────────────────────────────────
-    .withColumn("_source_file",    F.input_file_name())
+    # traceability metadata columns
+    .withColumn("_source_file",    F.col("_metadata.file_path"))
     .withColumn("_ingested_at",    F.current_timestamp())
     .withColumn("_execution_date", F.lit(execution_date))
     .withColumn("_env",            F.lit(ENV))
-    # ── particionamento por data de ingestão ─────────────────────────
+    # partition columns based on ingestion date
     .withColumn("ingest_year",     F.year(F.current_date()))
     .withColumn("ingest_month",    F.month(F.current_date()))
 )
@@ -73,32 +81,33 @@ query = (
     .option("mergeSchema",        "true")
     .outputMode("append")
     .partitionBy("ingest_year", "ingest_month")
-    .trigger(availableNow=True)   # processa tudo pendente e encerra
+    .trigger(availableNow=True)   # process all pending files and stop
     .toTable(BRONZE_TABLE)
 )
 
 query.awaitTermination()
-print("[OK] Stream concluído")
+print("[OK] Stream completed")
 
 # COMMAND ----------
 
-# MAGIC %md ## Validação
+# MAGIC %md ## Validation
 
 # COMMAND ----------
 
 df    = spark.read.format("delta").table(BRONZE_TABLE)
 count = df.count()
 
-print(f"Tabela  : {BRONZE_TABLE}")
-print(f"Linhas  : {count:,}")
-print(f"Colunas : {len(df.columns)}")
-print(f"\nColunas de metadados presentes:")
-for c in ["_source_file", "_ingested_at", "_execution_date", "ingest_year", "ingest_month"]:
-    print(f"  {'OK' if c in df.columns else 'FALTANDO'} : {c}")
+print(f"Table   : {BRONZE_TABLE}")
+print(f"Rows    : {count:,}")
+print(f"Columns : {len(df.columns)}")
+
+print("\nMetadata columns check:")
+for col in ["_source_file", "_ingested_at", "_execution_date", "ingest_year", "ingest_month"]:
+    status = "OK" if col in df.columns else "MISSING"
+    print(f"  {status} : {col}")
 
 display(df.orderBy(F.col("_ingested_at").desc()).limit(5))
 
-# MAGIC %md ### Histórico Delta
 spark.sql(f"DESCRIBE HISTORY {BRONZE_TABLE}").select(
     "version", "timestamp", "operation", "operationMetrics"
 ).show(5, truncate=False)
